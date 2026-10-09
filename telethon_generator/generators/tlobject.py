@@ -343,7 +343,11 @@ def _write_to_dict(tlobject, builder):
 
 def _write_to_bytes(tlobject, builder):
     builder.writeln("def _bytes(self):")
-    builder.writeln("self._assert_no_forbidden_constructors()")
+    # No _assert_no_forbidden_constructors() in the generated head: the
+    # serialized bytes are validated by SecurityGate.check_serialized in
+    # RequestState (every request passes through it), which covers every
+    # nested constructor ID; per-subtree Python walks multiplied the cost
+    # of every serialization
 
     # Some objects require more than one flag parameter to be set
     # at the same time. In this case, add an assertion.

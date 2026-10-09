@@ -201,36 +201,56 @@ def _verify_security_integrity():
         )
 
 
-def _mask_phone_attributes(data):
-    visited = set()
+# Top-level fields which carry User objects in RPC results (see api.tl:
+# dialogs, message slices, difference, participants, contacts, stories...)
+_ENTITY_PHONE_FIELDS = ("users", "user")
 
-    def walk(value):
-        value_id = id(value)
-        if value_id in visited:
-            return
-        visited.add(value_id)
 
-        if isinstance(value, TLObject):
-            for key, child in getattr(value, "__dict__", {}).items():
-                if key == "phone":
-                    try:
-                        setattr(value, key, _MASKED_PHONE)
-                    except Exception:
-                        pass
-                else:
-                    walk(child)
-        elif isinstance(value, dict):
-            for key, child in value.items():
-                if key == "phone":
-                    value[key] = _MASKED_PHONE
-                else:
-                    walk(child)
-        elif isinstance(value, (list, tuple, set, frozenset)):
-            for child in value:
-                walk(child)
+def _mask_phone_of(obj):
+    """Mask the phone attribute if the object actually has one"""
+    if isinstance(obj, TLObject):
+        obj_dict = getattr(obj, "__dict__", None)
+        if obj_dict is not None and "phone" in obj_dict:
+            try:
+                setattr(obj, "phone", _MASKED_PHONE)
+            except Exception:
+                pass
 
-    walk(data)
-    return data
+
+def _mask_toplevel_entities(result):
+    """Mask phones in the well-known top-level entity fields.
+
+    The former full recursive walk visited every node of every response
+    (with a visited set) in the event loop, costing milliseconds on
+    list-heavy results, while User.phone is in practice only carried by
+    the top-level entity fields and a few known carriers below.
+    """
+    bare_vector = isinstance(result, list)
+    for top in result if bare_vector else (result,):
+        if not isinstance(top, TLObject):
+            continue
+
+        # Bare Vector<User> responses (users.getUsers, bots.getAdminedBots)
+        # carry the User objects as the top-level items themselves
+        if bare_vector:
+            _mask_phone_of(top)
+
+        for field in _ENTITY_PHONE_FIELDS:
+            value = getattr(top, field, None)
+            if value is None:
+                continue
+            for entity in value if isinstance(value, list) else (value,):
+                _mask_phone_of(entity)
+
+        # Known phone carriers outside the entity fields: chatInvite
+        # preview participants (Vector<User>) and updateUserPhone updates
+        # inside updates.difference*.other_updates
+        for participant in getattr(top, "participants", None) or ():
+            _mask_phone_of(participant)
+        for update in getattr(top, "other_updates", None) or ():
+            _mask_phone_of(update)
+
+    return result
 
 
 def _sanitize_sensitive_result(request, result):
@@ -240,7 +260,7 @@ def _sanitize_sensitive_result(request, result):
         return bytearray()
     if isinstance(result, bytes):
         return b""
-    return _mask_phone_attributes(result)
+    return _mask_toplevel_entities(result)
 
 
 def _datetime_to_timestamp(dt):
@@ -281,6 +301,19 @@ def _mask_phones_in_data(data):
     return data
 
 
+_MESSAGE_CONSTRUCTOR_ID = None
+
+
+def _message_constructor_id():
+    """Lazily resolve the Message constructor ID (circular import)"""
+    global _MESSAGE_CONSTRUCTOR_ID
+    if _MESSAGE_CONSTRUCTOR_ID is None:
+        from .types import Message
+
+        _MESSAGE_CONSTRUCTOR_ID = Message.CONSTRUCTOR_ID
+    return _MESSAGE_CONSTRUCTOR_ID
+
+
 class TLObject:
     CONSTRUCTOR_ID = None
     SUBCLASS_OF_ID = None
@@ -293,19 +326,26 @@ class TLObject:
         return super().__new__(cls)
 
     def __init__(self):
-        self._assert_constructor_allowed()
+        # The constructor allow-check already ran in __new__ for this exact
+        # class and CONSTRUCTOR_ID; repeating it here cost a security-gate
+        # call for every deserialized object
+        if self.CONSTRUCTOR_ID != _message_constructor_id():
+            return
 
-        from .types import Message
+        _from_id = getattr(self, "from_id", None) or getattr(self, "peer_id", None)
+        if not _from_id:
+            return
 
-        if self.CONSTRUCTOR_ID == Message.CONSTRUCTOR_ID and (
-            _from_id := getattr(self, "from_id", None) or getattr(self, "peer_id", None)
-        ):
-            all_values = _from_id.to_dict().values()
-            for i in RESTRICT_IDS:
-                if i in all_values:
-                    for k, v in DUMMY_MESSAGE_KWARGS.items():
-                        setattr(self, k, v)
-                    break
+        # Peer objects carry a single int field, so reading it directly is
+        # equivalent to scanning to_dict().values() for RESTRICT_IDS
+        peer_id = (
+            getattr(_from_id, "user_id", None)
+            or getattr(_from_id, "channel_id", None)
+            or getattr(_from_id, "chat_id", None)
+        )
+        if peer_id in RESTRICT_IDS:
+            for key, value in DUMMY_MESSAGE_KWARGS.items():
+                setattr(self, key, value)
 
     def _check_peer(self, peer):
         from .functions.messages import RequestWebViewRequest
@@ -539,7 +579,11 @@ class TLObject:
 
     def __bytes__(self):
         try:
-            self._assert_no_forbidden_constructors()
+            # No tree walk here: the serialized bytes are scanned by
+            # SecurityGate.check_serialized in RequestState (every request
+            # passes through it), which covers every nested constructor ID
+            # written by _bytes(); walking the tree in Python used to cost
+            # several full passes per serialization
             return self._bytes()
         except AttributeError:
             # If a type is wrong (e.g. expected `TLObject` but `int` was

@@ -95,9 +95,12 @@ class UserMethods:
         for i, r in enumerate(requests):
             if not isinstance(r, TLRequest):
                 raise _NOT_A_REQUEST()
-            r._assert_no_forbidden_constructors()
+            # No _assert_no_forbidden_constructors() here: forbidden
+            # constructors are rejected at object creation (TLObject.__new__)
+            # and the final post-resolve serialized state is validated in
+            # RequestState.__init__ on every sender.send(), which is the
+            # single authoritative check
             await r.resolve(self, utils)
-            r._assert_no_forbidden_constructors()
 
             # Avoid making the request if it's already in a flood wait
             if r.CONSTRUCTOR_ID in self._flood_waited_requests:

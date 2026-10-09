@@ -30,6 +30,25 @@ DEFAULT_DELIMITERS = {
 DEFAULT_URL_RE = re.compile(r"\[([^]]*?)\]\(([\s\S]*?)\)")
 DEFAULT_URL_FORMAT = "[{0}]({1})"
 
+# Compiled delimiter regexes, keyed by the delimiter set content: parse()
+# runs on every outgoing message, and re-compiling the pattern each time
+# was pure per-message overhead
+_DELIM_RE_CACHE = {}
+
+
+def _get_delim_re(delimiters):
+    key = frozenset(delimiters.items())
+    cached = _DELIM_RE_CACHE.get(key)
+    if cached is None:
+        cached = re.compile(
+            "|".join(
+                "({})".format(re.escape(k))
+                for k in sorted(delimiters, key=len, reverse=True)
+            )
+        )
+        _DELIM_RE_CACHE[key] = cached
+    return cached
+
 
 def overlap(a, b, x, y):
     return max(a, x) < min(b, y)
@@ -61,12 +80,9 @@ def parse(message, delimiters=None, url_re=None):
     # Build a regex to efficiently test all delimiters at once.
     # Note that the largest delimiter should go first, we don't
     # want ``` to be interpreted as a single back-tick in a code block.
-    delim_re = re.compile(
-        "|".join(
-            "({})".format(re.escape(k))
-            for k in sorted(delimiters, key=len, reverse=True)
-        )
-    )
+    # Compiled once per distinct delimiter set (DEFAULT_DELIMITERS may be
+    # mutated by the application, so the cache is keyed by content).
+    delim_re = _get_delim_re(delimiters)
 
     # Cannot use a for loop because we need to skip some indices
     i = 0
