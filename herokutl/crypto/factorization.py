@@ -4,6 +4,8 @@ This module holds a fast Factorization class.
 
 from random import randint
 
+from rsa.prime import miller_rabin_primality_testing
+
 
 class Factorization:
     """
@@ -26,24 +28,31 @@ class Factorization:
             return 2, pq // 2
 
         # cryptg ships a Rust implementation of the same Pollard-Brent
-        # algorithm; it is orders of magnitude faster than pure Python
-        # and is only ever needed during login / DC migration. Tiny
-        # inputs make it panic (its Pollard-Brent has a fixed attempt
-        # budget), so any failure falls back to the pure Python path.
-        try:
-            from cryptg import factorize_pq_pair
-        except ImportError:
-            pass
-        else:
+        # algorithm; it is several times faster than pure Python and is
+        # only ever needed during login / DC migration. However, some
+        # inputs do not panic but loop forever while holding the GIL
+        # (tiny composites such as 9, and some primes), so the fast
+        # path is restricted to login-sized composites; everything
+        # else goes straight to the pure Python implementation, which
+        # always terminates.
+        if pq >= 2 ** 32 and not miller_rabin_primality_testing(pq, 16):
             try:
-                p, q = sorted(factorize_pq_pair(pq))
-            except BaseException:
-                # Rust panics surface as BaseException (pyo3) and cannot
-                # be caught as Exception; the call is microseconds long
+                from cryptg import factorize_pq_pair
+            except ImportError:
                 pass
             else:
-                if p * q == pq and 1 < p < q:
-                    return p, q
+                try:
+                    p, q = sorted(factorize_pq_pair(pq))
+                except (KeyboardInterrupt, SystemExit):
+                    raise
+                except BaseException:
+                    # Rust panics surface as BaseException (pyo3) and
+                    # cannot be caught as Exception; the call is
+                    # microseconds long
+                    pass
+                else:
+                    if p * q == pq and 1 < p < q:
+                        return p, q
 
         y, c, m = randint(1, pq - 1), randint(1, pq - 1), randint(1, pq - 1)
         g = r = q = 1
