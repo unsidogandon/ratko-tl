@@ -106,7 +106,7 @@ class MTProtoState:
 
         return aes_key, aes_iv
 
-    def write_data_as_message(self, buffer, data, content_related, *, after_id=None):
+    def write_data_as_message(self, buffer, data, content_related, *, after_id=None, compress=True):
         """
         Writes a message containing the given data into buffer.
 
@@ -115,13 +115,14 @@ class MTProtoState:
         msg_id = self._get_new_msg_id()
         seq_no = self._get_seq_no(content_related)
         if after_id is None:
-            body = GzipPacked.gzip_if_smaller(content_related, data)
+            body = GzipPacked.gzip_if_smaller(content_related, data, compress=compress)
         else:
             # The `RequestState` stores `bytes(request)`, not the request itself.
             # `invokeAfterMsg` wants a `TLRequest` though, hence the wrapping.
             body = GzipPacked.gzip_if_smaller(
                 content_related,
                 bytes(InvokeAfterMsgRequest(after_id, _OpaqueRequest(data))),
+                compress=compress,
             )
 
         buffer.write(struct.pack("<qii", msg_id, seq_no, len(body)))

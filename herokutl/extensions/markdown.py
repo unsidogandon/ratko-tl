@@ -91,7 +91,27 @@ def parse(message, delimiters=None, url_re=None):
     # Work on byte level with the utf-16le encoding to get the offsets right.
     # The offset will just be half the index we're at.
     message = add_surrogate(message)
+
+    # Jump straight to the next position where either pattern can start
+    # instead of probing both regexes at every single character (which
+    # dominated the parse cost for long messages). Semantics are those of
+    # the previous per-character probing: at any position the delimiter
+    # is tried first, and a delimiter that matched but is unclosed also
+    # suppresses the URL check at that same position.
     while i < len(message):
+        delim_m = delim_re.search(message, i)
+        url_m = url_re.search(message, i) if url_re else None
+
+        if not delim_m and not url_m:
+            break
+
+        # Ties are resolved in favour of the delimiter, mirroring the
+        # original per-position check order
+        if delim_m and (not url_m or delim_m.start() <= url_m.start()):
+            i = delim_m.start()
+        else:
+            i = url_m.start()
+
         m = delim_re.match(message, pos=i)
 
         # Did we find some delimiter here at `i`?
@@ -138,29 +158,33 @@ def parse(message, delimiters=None, url_re=None):
 
                 continue
 
-        elif url_re:
-            m = url_re.match(message, pos=i)
-            if m:
-                # Replace the whole match with only the inline URL text.
-                message = "".join(
-                    (message[: m.start()], m.group(1), message[m.end() :])
-                )
+            # Unclosed delimiter: skip this position entirely (the URL
+            # pattern was not retried here originally either)
+            i += 1
+            continue
 
-                delim_size = m.end() - m.start() - len(m.group(1))
-                for ent in result:
-                    # If the end is after our start, it is affected
-                    if ent.offset + ent.length > m.start():
-                        ent.length -= delim_size
+        m = url_re.match(message, pos=i)
+        if m:
+            # Replace the whole match with only the inline URL text.
+            message = "".join(
+                (message[: m.start()], m.group(1), message[m.end() :])
+            )
 
-                result.append(
-                    MessageEntityTextUrl(
-                        offset=m.start(),
-                        length=len(m.group(1)),
-                        url=del_surrogate(m.group(2)),
-                    )
+            delim_size = m.end() - m.start() - len(m.group(1))
+            for ent in result:
+                # If the end is after our start, it is affected
+                if ent.offset + ent.length > m.start():
+                    ent.length -= delim_size
+
+            result.append(
+                MessageEntityTextUrl(
+                    offset=m.start(),
+                    length=len(m.group(1)),
+                    url=del_surrogate(m.group(2)),
                 )
-                i += len(m.group(1))
-                continue
+            )
+            i += len(m.group(1))
+            continue
 
         i += 1
 

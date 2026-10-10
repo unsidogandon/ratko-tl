@@ -7,8 +7,14 @@ import struct
 from ..tl import TLRequest
 from ..tl.core.messagecontainer import MessageContainer
 from ..tl.core.tlmessage import TLMessage
+from ..tl.functions.upload import SaveBigFilePartRequest, SaveFilePartRequest
 
 _packer_security_logger = logging.getLogger(__name__)
+
+# Requests whose bodies consist of raw media bytes (upload file parts).
+# Such payloads are already incompressible, so attempting to gzip them
+# can never shrink the body and only wastes CPU on every sent part
+_NO_COMPRESS_REQUESTS = (SaveFilePartRequest, SaveBigFilePartRequest)
 
 
 class MessagePacker:
@@ -67,6 +73,7 @@ class MessagePacker:
                     state.data,
                     isinstance(state.request, TLRequest),
                     after_id=state.after.msg_id if state.after else None,
+                    compress=not isinstance(state.request, _NO_COMPRESS_REQUESTS),
                 )
                 batch.append(state)
                 self._log.debug(
